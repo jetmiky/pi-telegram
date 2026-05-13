@@ -101,21 +101,22 @@ Examples:
 - `write me a markdown file with the plan and send it back`
 - `generate a shell script and attach it`
 
-### Stop a run
+### Telegram commands
 
-In Telegram, send:
+In Telegram DM, these commands are supported:
+
+- `/status` — show model, usage, cost, and context status
+- `/model <model-id>` — switch model within current provider (example: `/model gpt-5.4`)
+- `/thinking <off|minimal|low|medium|high|xhigh>` — change thinking level
+- `/compact` — trigger compaction when pi is idle
+- `stop` or `/stop` — abort active turn
+- `/help` or `/start` — show help
+
+Unknown slash commands return:
 
 ```text
-stop
+invalid command, type /help if you need help
 ```
-
-or:
-
-```text
-/stop
-```
-
-That aborts the active pi turn.
 
 ### Queue follow-ups
 
