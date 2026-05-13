@@ -739,9 +739,11 @@ export default function (pi: ExtensionAPI) {
 		const firstMessage = messages[0];
 		if (!firstMessage) return;
 		const rawText = messages.map((message) => (message.text || message.caption || "").trim()).find((text) => text.length > 0) || "";
-		const lower = rawText.toLowerCase();
+		const tokens = rawText.trim().split(/\s+/).filter(Boolean);
+		const command = (tokens[0] || "").toLowerCase();
+		const arg = tokens[1];
 
-		if (lower === "stop" || lower === "/stop") {
+		if (command === "stop" || command === "/stop") {
 			if (currentAbort) {
 				if (queuedTelegramTurns.length > 0) {
 					preserveQueuedTurnsAsHistory = true;
@@ -755,7 +757,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (lower === "/compact") {
+		if (command === "/compact") {
 			if (!ctx.isIdle()) {
 				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Cannot compact while pi is busy. Send \"stop\" first.");
 				return;
@@ -773,7 +775,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (lower === "/status") {
+		if (command === "/status") {
 			let totalInput = 0;
 			let totalOutput = 0;
 			let totalCacheRead = 0;
@@ -820,17 +822,81 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (lower === "/help" || lower === "/start") {
+		if (command === "/model") {
+			if (!ctx.isIdle()) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, 'model change failed: pi is busy; send "stop" first');
+				return;
+			}
+			if (!arg) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "model change failed: usage: /model <model-id>");
+				return;
+			}
+			if (arg.includes("/")) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "model change failed: provider change not supported yet; use /model <model-id>");
+				return;
+			}
+			if (!ctx.model) {
+				await sendTextReply(
+					firstMessage.chat.id,
+					firstMessage.message_id,
+					"model change failed: No model is selected. In pi, run /settings → Model to pick one, then retry /model <model-id>.",
+				);
+				return;
+			}
+			const nextModel = ctx.modelRegistry.find(ctx.model.provider, arg);
+			if (!nextModel) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `model change failed: model not found: ${arg}`);
+				return;
+			}
+			const changed = await pi.setModel(nextModel);
+			if (!changed) {
+				await sendTextReply(
+					firstMessage.chat.id,
+					firstMessage.message_id,
+					`model change failed: auth not configured for provider ${nextModel.provider}`,
+				);
+				return;
+			}
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `model successfully changed: ${nextModel.provider}/${nextModel.id}`);
+			return;
+		}
+
+		if (command === "/thinking") {
+			if (!ctx.isIdle()) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, 'thinking change failed: pi is busy; send "stop" first');
+				return;
+			}
+			const requested = (arg || "").toLowerCase();
+			if (requested !== "off" && requested !== "minimal" && requested !== "low" && requested !== "medium" && requested !== "high" && requested !== "xhigh") {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "thinking change failed: usage: /thinking <off|minimal|low|medium|high|xhigh>");
+				return;
+			}
+			pi.setThinkingLevel(requested);
+			const actual = pi.getThinkingLevel();
+			if (actual === requested) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `thinking successfully changed: ${actual}`);
+			} else {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `thinking successfully changed (clamped to ${actual})`);
+			}
+			return;
+		}
+
+		if (command === "/help" || command === "/start") {
 			await sendTextReply(
 				firstMessage.chat.id,
 				firstMessage.message_id,
-				`Send me a message and I will forward it to pi. Commands: /status, /compact, stop.`,
+				"Send me a message and I will forward it to pi. Commands: /status, /model <model-id>, /thinking <level>, /compact, stop.",
 			);
 			if (config.allowedUserId === undefined && firstMessage.from) {
 				config.allowedUserId = firstMessage.from.id;
 				await writeConfig(config);
 				updateStatus(ctx);
 			}
+			return;
+		}
+
+		if (command.startsWith("/")) {
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "invalid command, type /help if you need help");
 			return;
 		}
 
