@@ -45,6 +45,16 @@ The extension stores config in:
 ~/.pi/agent/telegram.json
 ```
 
+Optional settings:
+
+```json
+{
+  "streamPreviews": false
+}
+```
+
+Set `streamPreviews` to `false` to disable Telegram preview streaming and keep only the typing indicator plus the final reply.
+
 ## Connect a pi session
 
 The Telegram bridge is session-local. Connect it only in the pi session that should own the bot:
@@ -125,9 +135,11 @@ If you send more Telegram messages while pi is busy, they are queued and process
 
 ## Streaming
 
-The extension streams assistant text previews back to Telegram while pi is generating.
+By default, the extension streams assistant text previews back to Telegram while pi is generating.
 
 It tries Telegram draft streaming first with `sendMessageDraft`. If that is not supported for your bot, it falls back to `sendMessage` plus `editMessageText`.
+
+If `streamPreviews` is set to `false` in `~/.pi/agent/telegram.json`, the extension skips preview streaming and shows only the typing indicator until the final reply is ready.
 
 ## Notes
 

@@ -13,6 +13,7 @@ interface TelegramConfig {
 	botId?: number;
 	allowedUserId?: number;
 	lastUpdateId?: number;
+	streamPreviews?: boolean;
 }
 
 interface TelegramApiResponse<T> {
@@ -144,6 +145,28 @@ interface TelegramPreviewState {
 	pendingText: string;
 	lastSentText: string;
 	flushTimer?: ReturnType<typeof setTimeout>;
+}
+
+export function areTelegramPreviewsEnabled(config: TelegramConfig): boolean {
+	return config.streamPreviews !== false;
+}
+
+export function createTelegramPreviewState(
+	config: TelegramConfig,
+	draftSupport: "unknown" | "supported" | "unsupported",
+): TelegramPreviewState | undefined {
+	if (!areTelegramPreviewsEnabled(config)) return undefined;
+	return {
+		mode: draftSupport === "unsupported" ? "message" : "draft",
+		pendingText: "",
+		lastSentText: "",
+	};
+}
+
+export function getTelegramFinalDeliveryMode(config: TelegramConfig, finalText?: string): "preview" | "text" | "none" {
+	if (!finalText) return "none";
+	if (areTelegramPreviewsEnabled(config) && finalText.length <= MAX_MESSAGE_LENGTH) return "preview";
+	return "text";
 }
 
 interface TelegramMediaGroupState {
@@ -1312,7 +1335,7 @@ export default function (pi: ExtensionAPI) {
 			const nextTurn = queuedTelegramTurns.shift();
 			if (nextTurn) {
 				activeTelegramTurn = { ...nextTurn };
-				previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
+				previewState = createTelegramPreviewState(config, draftSupport);
 				startTypingLoop(ctx);
 			}
 		}
@@ -1321,17 +1344,20 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_start", async (event, _ctx) => {
 		if (!activeTelegramTurn || !isAssistantMessage(event.message)) return;
+		if (!areTelegramPreviewsEnabled(config)) return;
 		if (previewState && (previewState.pendingText.trim().length > 0 || previewState.lastSentText.trim().length > 0)) {
 			await finalizePreview(activeTelegramTurn.chatId);
 		}
-		previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
+		previewState = createTelegramPreviewState(config, draftSupport);
 	});
 
 	pi.on("message_update", async (event, _ctx) => {
 		if (!activeTelegramTurn || !isAssistantMessage(event.message)) return;
+		if (!areTelegramPreviewsEnabled(config)) return;
 		if (!previewState) {
-			previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
+			previewState = createTelegramPreviewState(config, draftSupport);
 		}
+		if (!previewState) return;
 		previewState.pendingText = getMessageText(event.message);
 		schedulePreviewFlush(activeTelegramTurn.chatId);
 	});
@@ -1360,14 +1386,12 @@ export default function (pi: ExtensionAPI) {
 			previewState.pendingText = finalText ?? previewState.pendingText;
 		}
 
-		if (finalText && finalText.length <= MAX_MESSAGE_LENGTH) {
-			const finalized = await finalizePreview(turn.chatId);
-			if (!finalized && turn.queuedAttachments.length > 0 && !finalText) {
-				await sendTextReply(turn.chatId, turn.replyToMessageId, "Attached requested file(s).");
-			}
+		const deliveryMode = getTelegramFinalDeliveryMode(config, finalText);
+		if (deliveryMode === "preview") {
+			await finalizePreview(turn.chatId);
 		} else {
 			await clearPreview(turn.chatId);
-			if (finalText) {
+			if (deliveryMode === "text" && finalText) {
 				await sendTextReply(turn.chatId, turn.replyToMessageId, finalText);
 			} else if (turn.queuedAttachments.length > 0) {
 				await sendTextReply(turn.chatId, turn.replyToMessageId, "Attached requested file(s).");
