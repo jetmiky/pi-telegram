@@ -176,6 +176,9 @@ const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 1200;
 export const MAX_NEW_SESSION_NAME_LENGTH = 80;
 export const TELEGRAM_RECONNECT_REQUEST_ENTRY_TYPE = "telegram-reconnect-request";
 export const TELEGRAM_RECONNECT_CONSUMED_ENTRY_TYPE = "telegram-reconnect-consumed";
+const TELEGRAM_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+type TelegramThinkingLevel = (typeof TELEGRAM_THINKING_LEVELS)[number];
 
 const SYSTEM_PROMPT_SUFFIX = `
 
@@ -247,6 +250,50 @@ export function formatNewSessionConfirmation(result: { name?: string; truncated:
 
 export function shouldWaitForTelegramPollingToStop(isHandlingTelegramUpdate: boolean): boolean {
 	return !isHandlingTelegramUpdate;
+}
+
+function isTelegramThinkingLevel(value: string): value is TelegramThinkingLevel {
+	return TELEGRAM_THINKING_LEVELS.includes(value as TelegramThinkingLevel);
+}
+
+function parseTelegramModelCommand(
+	tokens: string[],
+):
+	| { ok: true; modelId: string; thinkingLevel?: TelegramThinkingLevel }
+	| { ok: false; message: string } {
+	if (tokens.length !== 2 && tokens.length !== 3) {
+		return { ok: false, message: "model change failed: usage: /model <model-id> [thinking-level]" };
+	}
+	const modelId = tokens[1];
+	if (!modelId) {
+		return { ok: false, message: "model change failed: usage: /model <model-id> [thinking-level]" };
+	}
+	if (modelId.includes("/")) {
+		return { ok: false, message: "model change failed: provider change not supported yet; use /model <model-id>" };
+	}
+	if (tokens.length === 2) {
+		return { ok: true, modelId };
+	}
+	const requestedThinkingLevel = (tokens[2] || "").toLowerCase();
+	if (!isTelegramThinkingLevel(requestedThinkingLevel)) {
+		return {
+			ok: false,
+			message: `model change failed: invalid thinking level: ${tokens[2]}; use ${TELEGRAM_THINKING_LEVELS.join("|")}`,
+		};
+	}
+	return { ok: true, modelId, thinkingLevel: requestedThinkingLevel };
+}
+
+function formatTelegramModelChangeReply(
+	provider: string,
+	modelId: string,
+	requestedThinkingLevel: TelegramThinkingLevel,
+	actualThinkingLevel: TelegramThinkingLevel,
+): string {
+	if (requestedThinkingLevel === actualThinkingLevel) {
+		return `model successfully changed: ${provider}/${modelId}; thinking: ${actualThinkingLevel}`;
+	}
+	return `model successfully changed: ${provider}/${modelId}; thinking: ${actualThinkingLevel} (clamped from ${requestedThinkingLevel})`;
 }
 
 export function findPendingTelegramReconnectRequest(entries: Array<{ type?: string; customType?: string; data?: unknown }>): TelegramReconnectRequest | undefined {
@@ -935,12 +982,9 @@ export default function (pi: ExtensionAPI) {
 				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, 'model change failed: pi is busy; send "stop" first');
 				return;
 			}
-			if (!arg) {
-				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "model change failed: usage: /model <model-id>");
-				return;
-			}
-			if (arg.includes("/")) {
-				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "model change failed: provider change not supported yet; use /model <model-id>");
+			const parsed = parseTelegramModelCommand(tokens);
+			if (!parsed.ok) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, parsed.message);
 				return;
 			}
 			if (!ctx.model) {
@@ -951,9 +995,9 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			const nextModel = ctx.modelRegistry.find(ctx.model.provider, arg);
+			const nextModel = ctx.modelRegistry.find(ctx.model.provider, parsed.modelId);
 			if (!nextModel) {
-				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `model change failed: model not found: ${arg}`);
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `model change failed: model not found: ${parsed.modelId}`);
 				return;
 			}
 			const changed = await pi.setModel(nextModel);
@@ -965,7 +1009,17 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `model successfully changed: ${nextModel.provider}/${nextModel.id}`);
+			if (!parsed.thinkingLevel) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `model successfully changed: ${nextModel.provider}/${nextModel.id}`);
+				return;
+			}
+			pi.setThinkingLevel(parsed.thinkingLevel);
+			const actualThinkingLevel = pi.getThinkingLevel();
+			await sendTextReply(
+				firstMessage.chat.id,
+				firstMessage.message_id,
+				formatTelegramModelChangeReply(nextModel.provider, nextModel.id, parsed.thinkingLevel, actualThinkingLevel),
+			);
 			return;
 		}
 
@@ -975,7 +1029,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const requested = (arg || "").toLowerCase();
-			if (requested !== "off" && requested !== "minimal" && requested !== "low" && requested !== "medium" && requested !== "high" && requested !== "xhigh") {
+			if (!isTelegramThinkingLevel(requested)) {
 				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "thinking change failed: usage: /thinking <off|minimal|low|medium|high|xhigh>");
 				return;
 			}
@@ -993,7 +1047,7 @@ export default function (pi: ExtensionAPI) {
 			await sendTextReply(
 				firstMessage.chat.id,
 				firstMessage.message_id,
-				"Send me a message and I will forward it to pi. Commands: /new [name], /status, /model <model-id>, /thinking <level>, /compact, stop.",
+				"Send me a message and I will forward it to pi. Commands: /new [name], /status, /model <model-id> [thinking-level], /thinking <level>, /compact, stop.",
 			);
 			if (config.allowedUserId === undefined && firstMessage.from) {
 				config.allowedUserId = firstMessage.from.id;

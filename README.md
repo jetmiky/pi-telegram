@@ -107,7 +107,7 @@ In Telegram DM, these commands are supported:
 
 - `/new [name]` — start a fresh pi session, reconnect Telegram, and optionally set the new session name
 - `/status` — show session name, model, thinking level, usage, cost, and context status
-- `/model <model-id>` — switch model within current provider (example: `/model gpt-5.4`)
+- `/model <model-id> [thinking-level]` — switch model within current provider and optionally set thinking level (example: `/model gpt-5.4 high`)
 - `/thinking <off|minimal|low|medium|high|xhigh>` — change thinking level
 - `/compact` — trigger compaction when pi is idle
 - `stop` or `/stop` — abort active turn
