@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 
 import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
 interface TelegramConfig {
@@ -151,6 +151,20 @@ interface TelegramMediaGroupState {
 	flushTimer?: ReturnType<typeof setTimeout>;
 }
 
+interface TelegramReconnectRequest {
+	requestId: string;
+	chatId: number;
+	replyToMessageId: number;
+	sessionName?: string;
+	truncated?: boolean;
+}
+
+interface TelegramReconnectConsumed {
+	requestId: string;
+}
+
+let latestTelegramCommandContext: ExtensionCommandContext | undefined;
+
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "telegram.json");
 const TEMP_DIR = join(homedir(), ".pi", "agent", "tmp", "telegram");
 const TELEGRAM_PREFIX = "[telegram]";
@@ -159,6 +173,9 @@ const MAX_ATTACHMENTS_PER_TURN = 10;
 const PREVIEW_THROTTLE_MS = 750;
 const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;
 const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 1200;
+export const MAX_NEW_SESSION_NAME_LENGTH = 80;
+export const TELEGRAM_RECONNECT_REQUEST_ENTRY_TYPE = "telegram-reconnect-request";
+export const TELEGRAM_RECONNECT_CONSUMED_ENTRY_TYPE = "telegram-reconnect-consumed";
 
 const SYSTEM_PROMPT_SUFFIX = `
 
@@ -210,6 +227,48 @@ function formatTokens(count: number): string {
 	if (count < 1000000) return `${Math.round(count / 1000)}k`;
 	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
 	return `${Math.round(count / 1000000)}M`;
+}
+
+export function parseTelegramNewSessionName(text: string): { name?: string; truncated: boolean } {
+	const rawName = text.slice(4).trim();
+	if (rawName.length === 0) return { name: undefined, truncated: false };
+	if (rawName.length <= MAX_NEW_SESSION_NAME_LENGTH) return { name: rawName, truncated: false };
+	return {
+		name: rawName.slice(0, MAX_NEW_SESSION_NAME_LENGTH),
+		truncated: true,
+	};
+}
+
+export function formatNewSessionConfirmation(result: { name?: string; truncated: boolean }): string {
+	if (!result.name) return "Started new session.";
+	if (!result.truncated) return `Started new session: ${result.name}`;
+	return `Started new session: ${result.name} (name truncated to ${MAX_NEW_SESSION_NAME_LENGTH} chars).`;
+}
+
+export function shouldWaitForTelegramPollingToStop(isHandlingTelegramUpdate: boolean): boolean {
+	return !isHandlingTelegramUpdate;
+}
+
+export function findPendingTelegramReconnectRequest(entries: Array<{ type?: string; customType?: string; data?: unknown }>): TelegramReconnectRequest | undefined {
+	const consumed = new Set<string>();
+	for (const entry of entries) {
+		if (entry.type !== "custom" || entry.customType !== TELEGRAM_RECONNECT_CONSUMED_ENTRY_TYPE || !entry.data || typeof entry.data !== "object") {
+			continue;
+		}
+		const requestId = (entry.data as TelegramReconnectConsumed).requestId;
+		if (typeof requestId === "string" && requestId.length > 0) consumed.add(requestId);
+	}
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index];
+		if (entry.type !== "custom" || entry.customType !== TELEGRAM_RECONNECT_REQUEST_ENTRY_TYPE || !entry.data || typeof entry.data !== "object") {
+			continue;
+		}
+		const request = entry.data as TelegramReconnectRequest;
+		if (typeof request.requestId !== "string" || consumed.has(request.requestId)) continue;
+		if (typeof request.chatId !== "number" || typeof request.replyToMessageId !== "number") continue;
+		return request;
+	}
+	return undefined;
 }
 
 function chunkParagraphs(text: string): string[] {
@@ -297,6 +356,9 @@ export default function (pi: ExtensionAPI) {
 	let previewState: TelegramPreviewState | undefined;
 	let draftSupport: "unknown" | "supported" | "unsupported" = "unknown";
 	let nextDraftId = 0;
+	let commandContextForSession: ExtensionCommandContext | undefined;
+	let handlingTelegramUpdate = false;
+	let shuttingDown = false;
 	const mediaGroups = new Map<string, TelegramMediaGroupState>();
 
 	function allocateDraftId(): number {
@@ -665,11 +727,13 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function stopPolling(): Promise<void> {
+	async function stopPolling(options: { wait?: boolean } = {}): Promise<void> {
+		const wait = options.wait ?? true;
+		const promise = pollingPromise;
 		stopTypingLoop();
 		pollingController?.abort();
 		pollingController = undefined;
-		await pollingPromise?.catch(() => undefined);
+		if (wait) await promise?.catch(() => undefined);
 		pollingPromise = undefined;
 	}
 
@@ -739,9 +803,51 @@ export default function (pi: ExtensionAPI) {
 		const firstMessage = messages[0];
 		if (!firstMessage) return;
 		const rawText = messages.map((message) => (message.text || message.caption || "").trim()).find((text) => text.length > 0) || "";
+		const textCommandSource = messages.map((message) => (message.text || "").trim()).find((text) => text.length > 0) || "";
 		const tokens = rawText.trim().split(/\s+/).filter(Boolean);
 		const command = (tokens[0] || "").toLowerCase();
 		const arg = tokens[1];
+		const textCommand = (textCommandSource.split(/\s+/, 1)[0] || "").toLowerCase();
+
+		if (command === "/new") {
+			if (textCommand !== "/new") {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "new session failed: /new must be sent as a text message.");
+				return;
+			}
+			if (!ctx.isIdle()) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, 'new session failed: pi is busy; send "stop" first');
+				return;
+			}
+			const sessionCommandContext = commandContextForSession ?? latestTelegramCommandContext;
+			if (!sessionCommandContext) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "new session failed: run /telegram-connect in pi and retry.");
+				return;
+			}
+			const parsedName = parseTelegramNewSessionName(textCommandSource);
+			queuedTelegramTurns = [];
+			preserveQueuedTurnsAsHistory = false;
+			const request: TelegramReconnectRequest = {
+				requestId: crypto.randomUUID(),
+				chatId: firstMessage.chat.id,
+				replyToMessageId: firstMessage.message_id,
+				sessionName: parsedName.name,
+				truncated: parsedName.truncated,
+			};
+			const result = await sessionCommandContext.newSession({
+				parentSession: sessionCommandContext.sessionManager.getSessionFile(),
+				setup: async (sessionManager) => {
+					if (request.sessionName) sessionManager.appendSessionInfo(request.sessionName);
+					sessionManager.appendCustomEntry(TELEGRAM_RECONNECT_REQUEST_ENTRY_TYPE, request);
+				},
+				withSession: async (replacementCtx) => {
+					latestTelegramCommandContext = replacementCtx;
+				},
+			});
+			if (result.cancelled) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "New session cancelled.");
+			}
+			return;
+		}
 
 		if (command === "stop" || command === "/stop") {
 			if (currentAbort) {
@@ -793,9 +899,11 @@ export default function (pi: ExtensionAPI) {
 
 			const usage = ctx.getContextUsage();
 			const lines: string[] = [];
+			lines.push(`Session: ${pi.getSessionName() ?? "unnamed"}`);
 			if (ctx.model) {
 				lines.push(`Model: ${ctx.model.provider}/${ctx.model.id}`);
 			}
+			lines.push(`Thinking: ${pi.getThinkingLevel()}`);
 			const tokenParts: string[] = [];
 			if (totalInput) tokenParts.push(`↑${formatTokens(totalInput)}`);
 			if (totalOutput) tokenParts.push(`↓${formatTokens(totalOutput)}`);
@@ -885,7 +993,7 @@ export default function (pi: ExtensionAPI) {
 			await sendTextReply(
 				firstMessage.chat.id,
 				firstMessage.message_id,
-				"Send me a message and I will forward it to pi. Commands: /status, /model <model-id>, /thinking <level>, /compact, stop.",
+				"Send me a message and I will forward it to pi. Commands: /new [name], /status, /model <model-id>, /thinking <level>, /compact, stop.",
 			);
 			if (config.allowedUserId === undefined && firstMessage.from) {
 				config.allowedUserId = firstMessage.from.id;
@@ -933,6 +1041,7 @@ export default function (pi: ExtensionAPI) {
 	async function handleUpdate(update: TelegramUpdate, ctx: ExtensionContext): Promise<void> {
 		const message = update.message || update.edited_message;
 		if (!message || message.chat.type !== "private" || !message.from || message.from.is_bot) return;
+		if (update.edited_message && !update.message && message.text?.trim().toLowerCase().startsWith("/new")) return;
 
 		if (config.allowedUserId === undefined) {
 			config.allowedUserId = message.from.id;
@@ -984,9 +1093,16 @@ export default function (pi: ExtensionAPI) {
 					{ signal },
 				);
 				for (const update of updates) {
+					if (signal.aborted) return;
 					config.lastUpdateId = update.update_id;
 					await writeConfig(config);
-					await handleUpdate(update, ctx);
+					handlingTelegramUpdate = true;
+					try {
+						await handleUpdate(update, ctx);
+					} finally {
+						handlingTelegramUpdate = false;
+					}
+					if (signal.aborted) return;
 				}
 			} catch (error) {
 				if (signal.aborted) return;
@@ -1005,7 +1121,7 @@ export default function (pi: ExtensionAPI) {
 		pollingPromise = pollLoop(ctx, pollingController.signal).finally(() => {
 			pollingPromise = undefined;
 			pollingController = undefined;
-			updateStatus(ctx);
+			if (!shuttingDown) updateStatus(ctx);
 		});
 		updateStatus(ctx);
 	}
@@ -1068,6 +1184,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("telegram-connect", {
 		description: "Start the Telegram bridge in this pi session",
 		handler: async (_args, ctx) => {
+			commandContextForSession = ctx;
+			latestTelegramCommandContext = ctx;
 			config = await readConfig();
 			if (!config.botToken) {
 				await promptForConfig(ctx);
@@ -1087,13 +1205,31 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		shuttingDown = false;
 		config = await readConfig();
 		await mkdir(TEMP_DIR, { recursive: true });
 		updateStatus(ctx);
+
+		const reconnectRequest = findPendingTelegramReconnectRequest(ctx.sessionManager.getEntries());
+		if (!reconnectRequest) return;
+		try {
+			await startPolling(ctx);
+			await sendTextReply(
+				reconnectRequest.chatId,
+				reconnectRequest.replyToMessageId,
+				formatNewSessionConfirmation({ name: reconnectRequest.sessionName, truncated: reconnectRequest.truncated ?? false }),
+			);
+			pi.appendEntry(TELEGRAM_RECONNECT_CONSUMED_ENTRY_TYPE, { requestId: reconnectRequest.requestId } satisfies TelegramReconnectConsumed);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Telegram reconnect after /new failed: ${message}`, "error");
+		}
 	});
 
 	pi.on("session_shutdown", async (_event, _ctx) => {
+		shuttingDown = true;
 		queuedTelegramTurns = [];
+		commandContextForSession = undefined;
 		for (const state of mediaGroups.values()) {
 			if (state.flushTimer) clearTimeout(state.flushTimer);
 		}
@@ -1104,7 +1240,7 @@ export default function (pi: ExtensionAPI) {
 		activeTelegramTurn = undefined;
 		currentAbort = undefined;
 		preserveQueuedTurnsAsHistory = false;
-		await stopPolling();
+		await stopPolling({ wait: shouldWaitForTelegramPollingToStop(handlingTelegramUpdate) });
 	});
 
 	pi.on("before_agent_start", async (event) => {
