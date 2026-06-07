@@ -186,7 +186,49 @@ interface TelegramReconnectConsumed {
 	requestId: string;
 }
 
-let latestTelegramCommandContext: ExtensionCommandContext | undefined;
+export interface TelegramSessionContextStore<T> {
+	get(): T | undefined;
+	set(ctx: T): void;
+	clear(): void;
+}
+
+export interface TelegramNewSessionContext<T> {
+	newSession(options?: {
+		parentSession?: string;
+		setup?: (...args: any[]) => Promise<void>;
+		withSession?: (ctx: T) => Promise<void>;
+	}): Promise<{ cancelled: boolean }>;
+}
+
+export function createTelegramSessionContextStore<T>(): TelegramSessionContextStore<T> {
+	let current: T | undefined;
+	return {
+		get: () => current,
+		set: (ctx) => {
+			current = ctx;
+		},
+		clear: () => {
+			current = undefined;
+		},
+	};
+}
+
+export async function createTelegramNewSessionWithFreshContext<T extends TelegramNewSessionContext<T>>(
+	store: TelegramSessionContextStore<T>,
+	options?: Parameters<T["newSession"]>[0],
+): Promise<{ cancelled: boolean }> {
+	const ctx = store.get();
+	if (!ctx) throw new Error("No Telegram session context is available");
+	return ctx.newSession({
+		...options,
+		withSession: async (replacementCtx) => {
+			store.set(replacementCtx);
+			await options?.withSession?.(replacementCtx);
+		},
+	});
+}
+
+const telegramCommandContextStore = createTelegramSessionContextStore<ExtensionCommandContext>();
 
 const TELEGRAM_PREFIX = "[telegram]";
 const MAX_MESSAGE_LENGTH = 4096;
@@ -410,7 +452,6 @@ export default function (pi: ExtensionAPI) {
 	let previewState: TelegramPreviewState | undefined;
 	let draftSupport: "unknown" | "supported" | "unsupported" = "unknown";
 	let nextDraftId = 0;
-	let commandContextForSession: ExtensionCommandContext | undefined;
 	let handlingTelegramUpdate = false;
 	let shuttingDown = false;
 	const mediaGroups = new Map<string, TelegramMediaGroupState>();
@@ -905,7 +946,7 @@ export default function (pi: ExtensionAPI) {
 				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, 'new session failed: pi is busy; send "stop" first');
 				return;
 			}
-			const sessionCommandContext = commandContextForSession ?? latestTelegramCommandContext;
+			const sessionCommandContext = telegramCommandContextStore.get();
 			if (!sessionCommandContext) {
 				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "new session failed: run /telegram-connect in pi and retry.");
 				return;
@@ -920,14 +961,15 @@ export default function (pi: ExtensionAPI) {
 				sessionName: parsedName.name,
 				truncated: parsedName.truncated,
 			};
-			const result = await sessionCommandContext.newSession({
+			const result = await createTelegramNewSessionWithFreshContext(telegramCommandContextStore, {
 				parentSession: sessionCommandContext.sessionManager.getSessionFile(),
 				setup: async (sessionManager) => {
-					if (request.sessionName) sessionManager.appendSessionInfo(request.sessionName);
-					sessionManager.appendCustomEntry(TELEGRAM_RECONNECT_REQUEST_ENTRY_TYPE, request);
-				},
-				withSession: async (replacementCtx) => {
-					latestTelegramCommandContext = replacementCtx;
+					const writableSessionManager = sessionManager as {
+						appendSessionInfo(name: string): void;
+						appendCustomEntry(customType: string, data?: unknown): void;
+					};
+					if (request.sessionName) writableSessionManager.appendSessionInfo(request.sessionName);
+					writableSessionManager.appendCustomEntry(TELEGRAM_RECONNECT_REQUEST_ENTRY_TYPE, request);
 				},
 			});
 			if (result.cancelled) {
@@ -1291,8 +1333,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("usage: /telegram-connect [local|global]", "error");
 				return;
 			}
-			commandContextForSession = ctx;
-			latestTelegramCommandContext = ctx;
+			telegramCommandContextStore.set(ctx);
 			await refreshStorage(ctx.cwd, parsed.scope);
 			config = await readConfig();
 			if (!config.botToken) {
@@ -1339,7 +1380,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		shuttingDown = true;
 		queuedTelegramTurns = [];
-		commandContextForSession = undefined;
 		for (const state of mediaGroups.values()) {
 			if (state.flushTimer) clearTimeout(state.flushTimer);
 		}
