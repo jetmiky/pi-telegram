@@ -4,6 +4,9 @@
   "private": false,
   "description": "Telegram DM bridge extension for pi",
   "type": "module",
+  "scripts": {
+    "test": "bun test"
+  },
   "keywords": ["pi-package", "pi", "telegram", "bot", "extension"],
   "license": "MIT",
   "repository": {

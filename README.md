@@ -37,13 +37,43 @@ Start pi, then run:
 /telegram-setup
 ```
 
-Paste the bot token when prompted.
+Choose where to store the Telegram config, then paste the bot token when prompted:
 
-The extension stores config in:
+```text
+Project-local: .pi/telegram.json
+Global: ~/.pi/agent/telegram.json
+```
+
+You can also skip the wizard:
+
+```bash
+/telegram-setup local
+/telegram-setup global
+```
+
+Project-local setup stores config in:
+
+```text
+.pi/telegram.json
+```
+
+Project-local setup also appends these entries to the project root `.gitignore`, or creates `.gitignore` if missing:
+
+```gitignore
+# pi-telegram local secrets/cache
+.pi/telegram.json
+.pi/tmp/telegram/
+```
+
+Global setup stores config in:
 
 ```text
 ~/.pi/agent/telegram.json
 ```
+
+Global setup does not modify the project `.gitignore`.
+
+If the project does not have `.pi/telegram.json`, `pi-telegram` falls back to the global config when connecting automatically.
 
 Optional settings:
 
@@ -55,12 +85,21 @@ Optional settings:
 
 Set `streamPreviews` to `false` to disable Telegram preview streaming and keep only the typing indicator plus the final reply.
 
+`/telegram-status` shows whether the current session is using project-local or global storage, plus the active config and temp paths.
+
 ## Connect a pi session
 
 The Telegram bridge is session-local. Connect it only in the pi session that should own the bot:
 
 ```bash
 /telegram-connect
+```
+
+By default, connect uses project-local config first, then global config as a fallback. You can force either scope:
+
+```bash
+/telegram-connect local
+/telegram-connect global
 ```
 
 To stop polling in the current session:
@@ -97,7 +136,8 @@ Send any message in the bot DM. It is forwarded into pi with a `[telegram]` pref
 Send images, albums, or files in the DM.
 
 The extension:
-- downloads them to `~/.pi/agent/tmp/telegram`
+- downloads them to `.pi/tmp/telegram` when project-local config is active
+- otherwise uses the legacy global temp dir `~/.pi/agent/tmp/telegram`
 - includes local file paths in the prompt
 - forwards inbound images as image inputs to pi
 
@@ -139,11 +179,30 @@ By default, the extension streams assistant text previews back to Telegram while
 
 It tries Telegram draft streaming first with `sendMessageDraft`. If that is not supported for your bot, it falls back to `sendMessage` plus `editMessageText`.
 
-If `streamPreviews` is set to `false` in `~/.pi/agent/telegram.json`, the extension skips preview streaming and shows only the typing indicator until the final reply is ready.
+If `streamPreviews` is set to `false` in the active Telegram config file (`.pi/telegram.json` or the legacy `~/.pi/agent/telegram.json` fallback), the extension skips preview streaming and shows only the typing indicator until the final reply is ready.
+
+## Parallel bots per project
+
+You can run multiple pi sessions in parallel with different Telegram bots by configuring each project separately:
+
+```bash
+cd project-a
+pi
+/telegram-setup
+/telegram-connect
+
+cd project-b
+pi
+/telegram-setup
+/telegram-connect
+```
+
+Each project should use a different bot token. `/telegram-setup local` will also keep the project-local Telegram config and downloads out of git by updating the project `.gitignore`.
 
 ## Notes
 
-- Only one pi session should be connected to the bot at a time
+- Only one pi session should be connected to a given bot at a time
+- Different projects can use different Telegram bots in parallel
 - Replies are sent as normal Telegram messages, not quote-replies
 - Long replies are split below Telegram's 4096 character limit
 - Outbound files are sent via `telegram_attach`
