@@ -120,6 +120,7 @@ After token setup and `/telegram-connect`:
 
 1. Open the DM with your bot in Telegram
 2. Send `/start`
+3. The bot replies that pairing succeeded and includes the Telegram command list plus a BotFather `/setcommands` block you can copy
 
 The first DM user becomes the allowed Telegram user for the bridge. The extension only accepts messages from that user.
 
@@ -156,12 +157,21 @@ Examples:
 In Telegram DM, these commands are supported:
 
 - `/new [name]` — start a fresh pi session, reconnect Telegram, and optionally set the new session name
-- `/status` — show session name, model, thinking level, usage, cost, and context status
-- `/model <model-id> [thinking-level]` — switch model within current provider and optionally set thinking level (example: `/model gpt-5.4 high`)
+- `/status` — show session name, active directory, model, thinking level, usage, cost, and context status
+- `/model <model-id> [thinking-level]` — switch model within current provider and reply with the active model and thinking level (example reply: `active model: gpt-5.4 high`)
 - `/thinking <off|minimal|low|medium|high|xhigh>` — change thinking level
 - `/compact` — trigger compaction when pi is idle
 - `stop` or `/stop` — abort active turn
-- `/help` or `/start` — show help
+- `/help` — show help plus a BotFather `/setcommands` copy block
+- `/start` — pair on first use, then show normal help on later use
+
+On first pairing, the `/start` reply includes:
+
+- `Telegram bridge paired with this account.`
+- the normal Telegram command list
+- a BotFather-ready `/setcommands` block in `command - description` format
+
+`/help` always includes the BotFather block again so you can retrieve it later.
 
 Unknown slash commands return:
 

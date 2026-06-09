@@ -240,6 +240,24 @@ export const MAX_NEW_SESSION_NAME_LENGTH = 80;
 export const TELEGRAM_RECONNECT_REQUEST_ENTRY_TYPE = "telegram-reconnect-request";
 export const TELEGRAM_RECONNECT_CONSUMED_ENTRY_TYPE = "telegram-reconnect-consumed";
 const TELEGRAM_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const TELEGRAM_USER_COMMANDS = [
+	"/new [name] - start a fresh pi session",
+	"/status - show session, directory, model, usage, cost, and context",
+	"/model <model-id> [thinking-level] - switch model within current provider",
+	"/thinking <level> - change thinking level",
+	"/compact - compact context",
+	"/stop - abort active turn",
+	"/help - show help",
+] as const;
+const TELEGRAM_BOTFATHER_COMMANDS = [
+	"new - start a fresh pi session, optionally with a name",
+	"status - show session, directory, model, usage, cost, and context",
+	"model - switch model within current provider, optionally setting thinking level",
+	"thinking - change thinking level",
+	"compact - compact context",
+	"stop - abort active turn",
+	"help - show help",
+] as const;
 
 type TelegramThinkingLevel = (typeof TELEGRAM_THINKING_LEVELS)[number];
 
@@ -347,16 +365,47 @@ function parseTelegramModelCommand(
 	return { ok: true, modelId, thinkingLevel: requestedThinkingLevel };
 }
 
-function formatTelegramModelChangeReply(
-	provider: string,
-	modelId: string,
-	requestedThinkingLevel: TelegramThinkingLevel,
-	actualThinkingLevel: TelegramThinkingLevel,
-): string {
-	if (requestedThinkingLevel === actualThinkingLevel) {
-		return `model successfully changed: ${provider}/${modelId}; thinking: ${actualThinkingLevel}`;
+export function formatTelegramBotFatherCommands(): string {
+	return TELEGRAM_BOTFATHER_COMMANDS.join("\n");
+}
+
+export function formatTelegramHelpReply(options: { includeBotFatherCommands?: boolean } = {}): string {
+	const sections = [
+		"Send me a message and I will forward it to pi.",
+		`Commands:\n${TELEGRAM_USER_COMMANDS.join("\n")}`,
+	];
+	if (options.includeBotFatherCommands) {
+		sections.push(`Copy this into BotFather /setcommands:\n\n${formatTelegramBotFatherCommands()}`);
 	}
-	return `model successfully changed: ${provider}/${modelId}; thinking: ${actualThinkingLevel} (clamped from ${requestedThinkingLevel})`;
+	return sections.join("\n\n");
+}
+
+export function formatTelegramPairedReply(): string {
+	return `Telegram bridge paired with this account.\n\n${formatTelegramHelpReply({ includeBotFatherCommands: true })}`;
+}
+
+export function formatTelegramActiveModelReply(modelId: string, thinkingLevel: TelegramThinkingLevel): string {
+	return `active model: ${modelId} ${thinkingLevel}`;
+}
+
+export function formatTelegramStatusReply(options: {
+	sessionName?: string;
+	directory: string;
+	model?: { provider: string; id: string };
+	thinkingLevel: string;
+	usageLine?: string;
+	costLine?: string;
+	contextLine: string;
+}): string {
+	const lines = [`Session: ${options.sessionName ?? "unnamed"}`, `Directory: ${options.directory}`];
+	if (options.model) {
+		lines.push(`Model: ${options.model.provider}/${options.model.id}`);
+	}
+	lines.push(`Thinking: ${options.thinkingLevel}`);
+	if (options.usageLine) lines.push(options.usageLine);
+	if (options.costLine) lines.push(options.costLine);
+	lines.push(options.contextLine);
+	return lines.join("\n");
 }
 
 export function findPendingTelegramReconnectRequest(entries: Array<{ type?: string; customType?: string; data?: unknown }>): TelegramReconnectRequest | undefined {
@@ -1027,35 +1076,31 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const usage = ctx.getContextUsage();
-			const lines: string[] = [];
-			lines.push(`Session: ${pi.getSessionName() ?? "unnamed"}`);
-			if (ctx.model) {
-				lines.push(`Model: ${ctx.model.provider}/${ctx.model.id}`);
-			}
-			lines.push(`Thinking: ${pi.getThinkingLevel()}`);
 			const tokenParts: string[] = [];
 			if (totalInput) tokenParts.push(`↑${formatTokens(totalInput)}`);
 			if (totalOutput) tokenParts.push(`↓${formatTokens(totalOutput)}`);
 			if (totalCacheRead) tokenParts.push(`R${formatTokens(totalCacheRead)}`);
 			if (totalCacheWrite) tokenParts.push(`W${formatTokens(totalCacheWrite)}`);
-			if (tokenParts.length > 0) {
-				lines.push(`Usage: ${tokenParts.join(" ")}`);
-			}
 			const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
-			if (totalCost || usingSubscription) {
-				lines.push(`Cost: $${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
-			}
+			let contextLine = "Context: unknown";
 			if (usage) {
 				const contextWindow = usage.contextWindow ?? ctx.model?.contextWindow ?? 0;
 				const percent = usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?";
-				lines.push(`Context: ${percent}/${formatTokens(contextWindow)}`);
-			} else {
-				lines.push("Context: unknown");
+				contextLine = `Context: ${percent}/${formatTokens(contextWindow)}`;
 			}
-			if (lines.length === 0) {
-				lines.push("No usage data yet.");
-			}
-			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, lines.join("\n"));
+			await sendTextReply(
+				firstMessage.chat.id,
+				firstMessage.message_id,
+				formatTelegramStatusReply({
+					sessionName: pi.getSessionName() ?? "unnamed",
+					directory: ctx.cwd || process.cwd(),
+					model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
+					thinkingLevel: pi.getThinkingLevel(),
+					usageLine: tokenParts.length > 0 ? `Usage: ${tokenParts.join(" ")}` : undefined,
+					costLine: totalCost || usingSubscription ? `Cost: $${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}` : undefined,
+					contextLine,
+				}),
+			);
 			return;
 		}
 
@@ -1091,16 +1136,13 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			if (!parsed.thinkingLevel) {
-				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `model successfully changed: ${nextModel.provider}/${nextModel.id}`);
-				return;
+			if (parsed.thinkingLevel) {
+				pi.setThinkingLevel(parsed.thinkingLevel);
 			}
-			pi.setThinkingLevel(parsed.thinkingLevel);
-			const actualThinkingLevel = pi.getThinkingLevel();
 			await sendTextReply(
 				firstMessage.chat.id,
 				firstMessage.message_id,
-				formatTelegramModelChangeReply(nextModel.provider, nextModel.id, parsed.thinkingLevel, actualThinkingLevel),
+				formatTelegramActiveModelReply(nextModel.id, pi.getThinkingLevel()),
 			);
 			return;
 		}
@@ -1125,12 +1167,18 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (command === "/help" || command === "/start") {
-			await sendTextReply(
-				firstMessage.chat.id,
-				firstMessage.message_id,
-				"Send me a message and I will forward it to pi. Commands: /new [name], /status, /model <model-id> [thinking-level], /thinking <level>, /compact, stop.",
-			);
+		if (command === "/help") {
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, formatTelegramHelpReply({ includeBotFatherCommands: true }));
+			if (config.allowedUserId === undefined && firstMessage.from) {
+				config.allowedUserId = firstMessage.from.id;
+				await writeConfig();
+				updateStatus(ctx);
+			}
+			return;
+		}
+
+		if (command === "/start") {
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, formatTelegramHelpReply());
 			if (config.allowedUserId === undefined && firstMessage.from) {
 				config.allowedUserId = firstMessage.from.id;
 				await writeConfig();
@@ -1183,6 +1231,11 @@ export default function (pi: ExtensionAPI) {
 			config.allowedUserId = message.from.id;
 			await writeConfig();
 			updateStatus(ctx);
+			const command = ((message.text || "").trim().split(/\s+/, 1)[0] || "").toLowerCase();
+			if (command === "/start" || command === "/help") {
+				await sendTextReply(message.chat.id, message.message_id, formatTelegramPairedReply());
+				return;
+			}
 			await sendTextReply(message.chat.id, message.message_id, "Telegram bridge paired with this account.");
 		}
 
