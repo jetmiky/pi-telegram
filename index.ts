@@ -391,6 +391,7 @@ export function formatTelegramActiveModelReply(modelId: string, thinkingLevel: T
 export function formatTelegramStatusReply(options: {
 	sessionName?: string;
 	directory: string;
+	telegramConfig?: { scope: "project" | "global"; path: string };
 	model?: { provider: string; id: string };
 	thinkingLevel: string;
 	usageLine?: string;
@@ -398,6 +399,9 @@ export function formatTelegramStatusReply(options: {
 	contextLine: string;
 }): string {
 	const lines = [`Session: ${options.sessionName ?? "unnamed"}`, `Directory: ${options.directory}`];
+	if (options.telegramConfig) {
+		lines.push(`Telegram config: ${options.telegramConfig.scope === "project" ? "local" : "global"} (${options.telegramConfig.path})`);
+	}
 	if (options.model) {
 		lines.push(`Model: ${options.model.provider}/${options.model.id}`);
 	}
@@ -1094,6 +1098,7 @@ export default function (pi: ExtensionAPI) {
 				formatTelegramStatusReply({
 					sessionName: pi.getSessionName() ?? "unnamed",
 					directory: ctx.cwd || process.cwd(),
+					telegramConfig: { scope: storage.scope, path: storage.configPath },
 					model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
 					thinkingLevel: pi.getThinkingLevel(),
 					usageLine: tokenParts.length > 0 ? `Usage: ${tokenParts.join(" ")}` : undefined,
