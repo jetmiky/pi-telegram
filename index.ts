@@ -443,13 +443,17 @@ export function formatTelegramBotFatherCommands(): string {
 	return TELEGRAM_BOTFATHER_COMMANDS.join("\n");
 }
 
+function escapeTelegramHtml(text: string): string {
+	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export function formatTelegramHelpReply(options: { includeBotFatherCommands?: boolean } = {}): string {
 	const sections = [
 		"Send me a message and I will forward it to pi.",
-		`Commands:\n${TELEGRAM_USER_COMMANDS.join("\n")}`,
+		`Commands:\n${TELEGRAM_USER_COMMANDS.map(escapeTelegramHtml).join("\n")}`,
 	];
 	if (options.includeBotFatherCommands) {
-		sections.push(`Copy this into BotFather /setcommands:\n\n<pre>${formatTelegramBotFatherCommands()}</pre>`);
+		sections.push(`Copy this into BotFather /setcommands:\n\n<pre>${escapeTelegramHtml(formatTelegramBotFatherCommands())}</pre>`);
 	}
 	return sections.join("\n\n");
 }
