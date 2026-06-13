@@ -164,6 +164,7 @@ In Telegram DM, these commands are supported:
 - `stop` or `/stop` — abort active turn
 - `/help` — show help plus a BotFather `/setcommands` copy block
 - `/start` — pair on first use, then show normal help on later use
+- `/git <status|log|nb>` — run safe git shortcuts in current Pi cwd (`git status --short --branch`, `git log --oneline --decorate -20`, `git switch -c <branch>`)
 
 On first pairing, the `/start` reply includes:
 

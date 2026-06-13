@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
@@ -248,6 +249,7 @@ const TELEGRAM_USER_COMMANDS = [
 	"/compact - compact context",
 	"/stop - abort active turn",
 	"/help - show help",
+	"/git <status|log|nb> - run safe git shortcuts in current cwd",
 ] as const;
 const TELEGRAM_BOTFATHER_COMMANDS = [
 	"new - start a fresh pi session, optionally with a name",
@@ -257,6 +259,7 @@ const TELEGRAM_BOTFATHER_COMMANDS = [
 	"compact - compact context",
 	"stop - abort active turn",
 	"help - show help",
+	"git - run safe git shortcuts in current cwd",
 ] as const;
 
 type TelegramThinkingLevel = (typeof TELEGRAM_THINKING_LEVELS)[number];
@@ -365,6 +368,27 @@ function parseTelegramModelCommand(
 	return { ok: true, modelId, thinkingLevel: requestedThinkingLevel };
 }
 
+export type TelegramGitCommand =
+	| { ok: true; kind: "status" }
+	| { ok: true; kind: "log" }
+	| { ok: true; kind: "nb"; branchName: string }
+	| { ok: false; message: string };
+
+export function parseTelegramGitCommand(tokens: string[]): TelegramGitCommand {
+	if (tokens.length < 2) return { ok: false, message: "usage: /git <status|log|nb>" };
+	const sub = (tokens[1] || "").toLowerCase();
+	if (sub === "status") return { ok: true, kind: "status" };
+	if (sub === "log") return { ok: true, kind: "log" };
+	if (sub === "nb") {
+		if (tokens.length < 3) return { ok: false, message: "usage: /git nb <branch-name>" };
+		if (tokens.length > 3) return { ok: false, message: "usage: /git nb <branch-name>" };
+		const branchName = tokens[2]!;
+		if (branchName.startsWith("-")) return { ok: false, message: "branch name cannot start with a dash" };
+		return { ok: true, kind: "nb", branchName };
+	}
+	return { ok: false, message: "usage: /git <status|log|nb>" };
+}
+
 export function formatTelegramBotFatherCommands(): string {
 	return TELEGRAM_BOTFATHER_COMMANDS.join("\n");
 }
@@ -382,6 +406,32 @@ export function formatTelegramHelpReply(options: { includeBotFatherCommands?: bo
 
 export function formatTelegramPairedReply(): string {
 	return `Telegram bridge paired with this account.\n\n${formatTelegramHelpReply({ includeBotFatherCommands: true })}`;
+}
+
+export type TelegramGitExecStep = { args: string[]; failureTitle?: string };
+
+export type TelegramGitExecSpec = { title: string; steps: TelegramGitExecStep[] };
+
+export function getTelegramGitExecSpec(command: Extract<TelegramGitCommand, { ok: true }>): TelegramGitExecSpec {
+	if (command.kind === "status") return { title: "git status", steps: [{ args: ["status", "--short", "--branch"] }] };
+	if (command.kind === "log") return { title: "git log", steps: [{ args: ["log", "--oneline", "--decorate", "-20"] }] };
+	return {
+		title: `git nb ${command.branchName}`,
+		steps: [
+			{ args: ["check-ref-format", "--branch", command.branchName], failureTitle: "invalid branch name" },
+			{ args: ["switch", "-c", command.branchName] },
+		],
+	};
+}
+
+export function formatTelegramGitReply(input: { title: string; exitCode: number; stdout: string; stderr: string }): string {
+	const output = input.stdout || input.stderr;
+	const body = output.length > 0 ? output : "(no output)";
+	let reply = `${input.title}\n\n${body}`;
+	if (reply.length > MAX_MESSAGE_LENGTH) {
+		reply = reply.slice(0, MAX_MESSAGE_LENGTH - "\n\n[output truncated]".length) + "\n\n[output truncated]";
+	}
+	return reply;
 }
 
 export function formatTelegramActiveModelReply(modelId: string, thinkingLevel: TelegramThinkingLevel): string {
@@ -726,6 +776,18 @@ export default function (pi: ExtensionAPI) {
 		}
 		previewState = undefined;
 		return state.messageId !== undefined;
+	}
+
+	function runGit(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+		return new Promise((resolve) => {
+			execFile("git", args, { cwd }, (error, stdout, stderr) => {
+				resolve({
+					exitCode: error ? (error as { code?: number }).code ?? 1 : 0,
+					stdout: typeof stdout === "string" ? stdout : "",
+					stderr: typeof stderr === "string" ? stderr : "",
+				});
+			});
+		});
 	}
 
 	async function sendTextReply(chatId: number, _replyToMessageId: number, text: string): Promise<number | undefined> {
@@ -1189,6 +1251,31 @@ export default function (pi: ExtensionAPI) {
 				await writeConfig();
 				updateStatus(ctx);
 			}
+			return;
+		}
+
+		if (command === "/git") {
+			const parsed = parseTelegramGitCommand(tokens);
+			if (!parsed.ok) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, parsed.message);
+				return;
+			}
+			if (parsed.kind === "nb" && !ctx.isIdle()) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "git nb failed: pi is busy; send \"stop\" first");
+				return;
+			}
+			const spec = getTelegramGitExecSpec(parsed);
+			const gitCwd = ctx.cwd || process.cwd();
+			let result: { exitCode: number; stdout: string; stderr: string } | undefined;
+			for (const step of spec.steps) {
+				result = await runGit(step.args, gitCwd);
+				if (result.exitCode !== 0) {
+					const title = step.failureTitle || `${spec.title} failed`;
+					await sendTextReply(firstMessage.chat.id, firstMessage.message_id, formatTelegramGitReply({ title, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }));
+					return;
+				}
+			}
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, formatTelegramGitReply({ title: spec.title, exitCode: result!.exitCode, stdout: result!.stdout, stderr: result!.stderr }));
 			return;
 		}
 
