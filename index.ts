@@ -449,7 +449,7 @@ export function formatTelegramHelpReply(options: { includeBotFatherCommands?: bo
 		`Commands:\n${TELEGRAM_USER_COMMANDS.join("\n")}`,
 	];
 	if (options.includeBotFatherCommands) {
-		sections.push(`Copy this into BotFather /setcommands:\n\n${formatTelegramBotFatherCommands()}`);
+		sections.push(`Copy this into BotFather /setcommands:\n\n<pre>${formatTelegramBotFatherCommands()}</pre>`);
 	}
 	return sections.join("\n\n");
 }
@@ -843,14 +843,13 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	async function sendTextReply(chatId: number, _replyToMessageId: number, text: string): Promise<number | undefined> {
+	async function sendTextReply(chatId: number, _replyToMessageId: number, text: string, parseMode?: "HTML"): Promise<number | undefined> {
 		const chunks = chunkParagraphs(text);
 		let lastMessageId: number | undefined;
 		for (const chunk of chunks) {
-			const sent = await callTelegram<TelegramSentMessage>("sendMessage", {
-				chat_id: chatId,
-				text: chunk,
-			});
+			const body: Record<string, unknown> = { chat_id: chatId, text: chunk };
+			if (parseMode) body.parse_mode = parseMode;
+			const sent = await callTelegram<TelegramSentMessage>("sendMessage", body);
 			lastMessageId = sent.message_id;
 		}
 		return lastMessageId;
@@ -1293,7 +1292,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (command === "/help") {
-			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, formatTelegramHelpReply({ includeBotFatherCommands: true }));
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, formatTelegramHelpReply({ includeBotFatherCommands: true }), "HTML");
 			if (config.allowedUserId === undefined && firstMessage.from) {
 				config.allowedUserId = firstMessage.from.id;
 				await writeConfig();
@@ -1303,7 +1302,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (command === "/start") {
-			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, formatTelegramHelpReply());
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, formatTelegramHelpReply({ includeBotFatherCommands: true }), "HTML");
 			if (config.allowedUserId === undefined && firstMessage.from) {
 				config.allowedUserId = firstMessage.from.id;
 				await writeConfig();
@@ -1383,7 +1382,7 @@ export default function (pi: ExtensionAPI) {
 			updateStatus(ctx);
 			const command = ((message.text || "").trim().split(/\s+/, 1)[0] || "").toLowerCase();
 			if (command === "/start" || command === "/help") {
-				await sendTextReply(message.chat.id, message.message_id, formatTelegramPairedReply());
+				await sendTextReply(message.chat.id, message.message_id, formatTelegramPairedReply(), "HTML");
 				return;
 			}
 			await sendTextReply(message.chat.id, message.message_id, "Telegram bridge paired with this account.");
