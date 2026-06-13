@@ -244,7 +244,7 @@ const TELEGRAM_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xh
 const TELEGRAM_USER_COMMANDS = [
 	"/new [name] - start a fresh pi session",
 	"/status - show session, directory, model, usage, cost, and context",
-	"/model <model-id> [thinking-level] - switch model within current provider",
+	"/model [provider/]model-id [thinking-level] - switch model, optionally including provider",
 	"/thinking <level> - change thinking level",
 	"/compact - compact context",
 	"/stop - abort active turn",
@@ -254,7 +254,7 @@ const TELEGRAM_USER_COMMANDS = [
 const TELEGRAM_BOTFATHER_COMMANDS = [
 	"new - start a fresh pi session, optionally with a name",
 	"status - show session, directory, model, usage, cost, and context",
-	"model - switch model within current provider, optionally setting thinking level",
+	"model - switch model, optionally including provider and thinking level",
 	"thinking - change thinking level",
 	"compact - compact context",
 	"stop - abort active turn",
@@ -340,23 +340,22 @@ function isTelegramThinkingLevel(value: string): value is TelegramThinkingLevel 
 	return TELEGRAM_THINKING_LEVELS.includes(value as TelegramThinkingLevel);
 }
 
-function parseTelegramModelCommand(
+export type TelegramModelCommand =
+	| { ok: true; modelSpecifier: string; thinkingLevel?: TelegramThinkingLevel }
+	| { ok: false; message: string };
+
+export function parseTelegramModelCommand(
 	tokens: string[],
-):
-	| { ok: true; modelId: string; thinkingLevel?: TelegramThinkingLevel }
-	| { ok: false; message: string } {
+): TelegramModelCommand {
 	if (tokens.length !== 2 && tokens.length !== 3) {
-		return { ok: false, message: "model change failed: usage: /model <model-id> [thinking-level]" };
+		return { ok: false, message: "model change failed: usage: /model [provider/]model-id [thinking-level]" };
 	}
-	const modelId = tokens[1];
-	if (!modelId) {
-		return { ok: false, message: "model change failed: usage: /model <model-id> [thinking-level]" };
-	}
-	if (modelId.includes("/")) {
-		return { ok: false, message: "model change failed: provider change not supported yet; use /model <model-id>" };
+	const modelSpecifier = tokens[1];
+	if (!modelSpecifier) {
+		return { ok: false, message: "model change failed: usage: /model [provider/]model-id [thinking-level]" };
 	}
 	if (tokens.length === 2) {
-		return { ok: true, modelId };
+		return { ok: true, modelSpecifier };
 	}
 	const requestedThinkingLevel = (tokens[2] || "").toLowerCase();
 	if (!isTelegramThinkingLevel(requestedThinkingLevel)) {
@@ -365,7 +364,58 @@ function parseTelegramModelCommand(
 			message: `model change failed: invalid thinking level: ${tokens[2]}; use ${TELEGRAM_THINKING_LEVELS.join("|")}`,
 		};
 	}
-	return { ok: true, modelId, thinkingLevel: requestedThinkingLevel };
+	return { ok: true, modelSpecifier, thinkingLevel: requestedThinkingLevel };
+}
+
+interface TelegramModelLookupModel {
+	provider: string;
+	id: string;
+}
+
+interface TelegramModelRegistryLookup<TModel extends TelegramModelLookupModel> {
+	getAll(): readonly TModel[];
+	find(provider: string, modelId: string): TModel | undefined;
+}
+
+export function resolveTelegramModelCommandTarget<TModel extends TelegramModelLookupModel>(options: {
+	modelRegistry: TelegramModelRegistryLookup<TModel>;
+	currentProvider: string;
+	modelSpecifier: string;
+}): { ok: true; model: TModel } | { ok: false; message: string } {
+	const { modelRegistry, currentProvider, modelSpecifier } = options;
+
+	// Build case-insensitive provider lookup
+	const allModels = modelRegistry.getAll();
+	const providerMap = new Map<string, string>();
+	for (const m of allModels) {
+		providerMap.set(m.provider.toLowerCase(), m.provider);
+	}
+
+	const slashIndex = modelSpecifier.indexOf("/");
+
+	if (slashIndex === -1) {
+		// No slash: exact match under current provider
+		const model = modelRegistry.find(currentProvider, modelSpecifier);
+		if (model) return { ok: true, model };
+		return { ok: false, message: `model change failed: model not found: ${modelSpecifier}` };
+	}
+
+	// Has slash: try provider prefix
+	const maybeProvider = modelSpecifier.substring(0, slashIndex);
+	const canonicalProvider = providerMap.get(maybeProvider.toLowerCase());
+
+	if (canonicalProvider) {
+		// Known provider prefix: split on first slash, exact match
+		const remainingModelId = modelSpecifier.substring(slashIndex + 1);
+		const model = modelRegistry.find(canonicalProvider, remainingModelId);
+		if (model) return { ok: true, model };
+		return { ok: false, message: `model change failed: model not found: ${modelSpecifier} (provider: ${canonicalProvider})` };
+	}
+
+	// Unknown provider prefix: treat whole specifier as model id under current provider
+	const model = modelRegistry.find(currentProvider, modelSpecifier);
+	if (model) return { ok: true, model };
+	return { ok: false, message: `model change failed: model not found: ${modelSpecifier}` };
 }
 
 export type TelegramGitCommand =
@@ -434,8 +484,11 @@ export function formatTelegramGitReply(input: { title: string; exitCode: number;
 	return reply;
 }
 
-export function formatTelegramActiveModelReply(modelId: string, thinkingLevel: TelegramThinkingLevel): string {
-	return `active model: ${modelId} ${thinkingLevel}`;
+export function formatTelegramActiveModelReply(
+	model: { provider: string; id: string },
+	thinkingLevel: TelegramThinkingLevel,
+): string {
+	return `active model: ${model.provider}/${model.id}; thinking: ${thinkingLevel}`;
 }
 
 export function formatTelegramStatusReply(options: {
@@ -1185,15 +1238,20 @@ export default function (pi: ExtensionAPI) {
 				await sendTextReply(
 					firstMessage.chat.id,
 					firstMessage.message_id,
-					"model change failed: No model is selected. In pi, run /settings → Model to pick one, then retry /model <model-id>.",
+					"model change failed: No model is selected. In pi, run /settings → Model to pick one, then retry /model [provider/]model-id.",
 				);
 				return;
 			}
-			const nextModel = ctx.modelRegistry.find(ctx.model.provider, parsed.modelId);
-			if (!nextModel) {
-				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `model change failed: model not found: ${parsed.modelId}`);
+			const resolved = resolveTelegramModelCommandTarget({
+				modelRegistry: ctx.modelRegistry,
+				currentProvider: ctx.model.provider,
+				modelSpecifier: parsed.modelSpecifier,
+			});
+			if (!resolved.ok) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, resolved.message);
 				return;
 			}
+			const nextModel = resolved.model;
 			const changed = await pi.setModel(nextModel);
 			if (!changed) {
 				await sendTextReply(
@@ -1209,7 +1267,7 @@ export default function (pi: ExtensionAPI) {
 			await sendTextReply(
 				firstMessage.chat.id,
 				firstMessage.message_id,
-				formatTelegramActiveModelReply(nextModel.id, pi.getThinkingLevel()),
+				formatTelegramActiveModelReply({ provider: nextModel.provider, id: nextModel.id }, pi.getThinkingLevel()),
 			);
 			return;
 		}
