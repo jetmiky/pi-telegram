@@ -495,8 +495,11 @@ export function formatTelegramActiveModelReply(
 	return `active model: ${model.provider}/${model.id}; thinking: ${thinkingLevel}`;
 }
 
+export type TelegramStatusState = "idle" | "busy";
+
 export function formatTelegramStatusReply(options: {
 	sessionName?: string;
+	status: TelegramStatusState;
 	directory: string;
 	telegramConfig?: { scope: "project" | "global"; path: string };
 	model?: { provider: string; id: string };
@@ -505,7 +508,7 @@ export function formatTelegramStatusReply(options: {
 	costLine?: string;
 	contextLine: string;
 }): string {
-	const lines = [`Session: ${options.sessionName ?? "unnamed"}`, `Directory: ${options.directory}`];
+	const lines = [`Session: ${options.sessionName ?? "unnamed"}`, `Status: ${options.status}`, `Directory: ${options.directory}`];
 	if (options.telegramConfig) {
 		lines.push(`Telegram config: ${options.telegramConfig.scope === "project" ? "local" : "global"} (${options.telegramConfig.path})`);
 	}
@@ -1215,6 +1218,7 @@ export default function (pi: ExtensionAPI) {
 				firstMessage.message_id,
 				formatTelegramStatusReply({
 					sessionName: pi.getSessionName() ?? "unnamed",
+					status: ctx.isIdle() ? "idle" : "busy",
 					directory: ctx.cwd || process.cwd(),
 					telegramConfig: { scope: storage.scope, path: storage.configPath },
 					model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,

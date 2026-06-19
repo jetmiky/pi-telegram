@@ -157,7 +157,7 @@ Examples:
 In Telegram DM, these commands are supported:
 
 - `/new [name]` — start a fresh pi session, reconnect Telegram, and optionally set the new session name
-- `/status` — show session name, active directory, loaded Telegram config scope/path, model, thinking level, usage, cost, and context status
+- `/status` — show session name, idle/busy status, active directory, loaded Telegram config scope/path, model, thinking level, usage, cost, and context status
 - `/model <model-id> [thinking-level]` — switch model within current provider and reply with the active model and thinking level (example reply: `active model: gpt-5.4 high`)
 - `/thinking <off|minimal|low|medium|high|xhigh>` — change thinking level
 - `/compact` — trigger compaction when pi is idle
