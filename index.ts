@@ -247,6 +247,7 @@ const TELEGRAM_USER_COMMANDS = [
 	"/model [provider/]model-id [thinking-level] - switch model, optionally including provider",
 	"/thinking <level> - change thinking level",
 	"/compact - compact context",
+	"/resend - resend the latest assistant reply from this session",
 	"/stop - abort active turn",
 	"/help - show help",
 	"/git <status|log|nb> - run safe git shortcuts in current cwd",
@@ -257,6 +258,7 @@ const TELEGRAM_BOTFATHER_COMMANDS = [
 	"model - switch model, optionally including provider and thinking level",
 	"thinking - change thinking level",
 	"compact - compact context",
+	"resend - resend the latest assistant reply from this session",
 	"stop - abort active turn",
 	"help - show help",
 	"git - run safe git shortcuts in current cwd",
@@ -522,6 +524,45 @@ export function formatTelegramStatusReply(options: {
 	return lines.join("\n");
 }
 
+function getAgentMessageText(message: unknown): string {
+	const value = message as Record<string, unknown>;
+	const content = Array.isArray(value.content) ? value.content : [];
+	return content
+		.filter((block): block is { type: string; text?: string } => typeof block === "object" && block !== null && "type" in block)
+		.filter((block) => block.type === "text" && typeof block.text === "string")
+		.map((block) => block.text as string)
+		.join("")
+		.trim();
+}
+
+export function findLastResendableAssistantText(entries: Array<{ type?: string; message?: unknown }>): string | undefined {
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index];
+		if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
+		const message = entry.message as Record<string, unknown>;
+		if (message.role !== "assistant") continue;
+		if (message.stopReason === "error") continue;
+		const text = getAgentMessageText(message);
+		if (text.length === 0) continue;
+		return text;
+	}
+	return undefined;
+}
+
+export function getTelegramResendReply(options: {
+	isIdle: boolean;
+	entries: Array<{ type?: string; message?: unknown }>;
+}): { ok: true; text: string } | { ok: false; message: string } {
+	if (!options.isIdle) {
+		return { ok: false, message: 'resend failed: pi is busy; send "stop" first' };
+	}
+	const text = findLastResendableAssistantText(options.entries);
+	if (!text) {
+		return { ok: false, message: "No previous reply to resend." };
+	}
+	return { ok: true, text };
+}
+
 export function findPendingTelegramReconnectRequest(entries: Array<{ type?: string; customType?: string; data?: unknown }>): TelegramReconnectRequest | undefined {
 	const consumed = new Set<string>();
 	for (const entry of entries) {
@@ -752,14 +793,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function getMessageText(message: AgentMessage): string {
-		const value = message as unknown as Record<string, unknown>;
-		const content = Array.isArray(value.content) ? value.content : [];
-		return content
-			.filter((block): block is { type: string; text?: string } => typeof block === "object" && block !== null && "type" in block)
-			.filter((block) => block.type === "text" && typeof block.text === "string")
-			.map((block) => block.text as string)
-			.join("")
-			.trim();
+		return getAgentMessageText(message);
 	}
 
 	async function clearPreview(chatId: number): Promise<void> {
@@ -890,13 +924,7 @@ export default function (pi: ExtensionAPI) {
 			if (message.role !== "assistant") continue;
 			const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
 			const errorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
-			const content = Array.isArray(message.content) ? message.content : [];
-			const text = content
-				.filter((block): block is { type: string; text?: string } => typeof block === "object" && block !== null && "type" in block)
-				.filter((block) => block.type === "text" && typeof block.text === "string")
-				.map((block) => block.text as string)
-				.join("")
-				.trim();
+			const text = getAgentMessageText(message);
 			return { text: text || undefined, stopReason, errorMessage };
 		}
 		return {};
@@ -1181,6 +1209,15 @@ export default function (pi: ExtensionAPI) {
 				},
 			});
 			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Compaction started.");
+			return;
+		}
+
+		if (command === "/resend") {
+			const resend = getTelegramResendReply({
+				isIdle: ctx.isIdle(),
+				entries: ctx.sessionManager.getEntries(),
+			});
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, resend.ok ? resend.text : resend.message);
 			return;
 		}
 

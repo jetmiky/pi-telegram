@@ -161,6 +161,7 @@ In Telegram DM, these commands are supported:
 - `/model <model-id> [thinking-level]` — switch model within current provider and reply with the active model and thinking level (example reply: `active model: gpt-5.4 high`)
 - `/thinking <off|minimal|low|medium|high|xhigh>` — change thinking level
 - `/compact` — trigger compaction when pi is idle
+- `/resend` — resend the latest successful assistant text reply from the current Pi session without calling the LLM again
 - `stop` or `/stop` — abort active turn
 - `/help` — show help plus a BotFather `/setcommands` copy block
 - `/start` — pair on first use, then show normal help on later use
