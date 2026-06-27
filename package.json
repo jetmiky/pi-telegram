@@ -20,6 +20,9 @@
   "pi": {
     "extensions": ["./index.ts"]
   },
+  "dependencies": {
+    "marked": "15.0.12"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-agent-core": "*",

@@ -16,6 +16,7 @@ import {
 	writeTelegramConfig,
 } from "./storage";
 import type { TelegramConfig, TelegramStorage, TelegramStorageScope } from "./storage";
+import { markdownToTelegramHtml, chunkTelegramHtml } from "./markdown";
 
 interface TelegramApiResponse<T> {
 	ok: boolean;
@@ -150,6 +151,10 @@ interface TelegramPreviewState {
 
 export function areTelegramPreviewsEnabled(config: TelegramConfig): boolean {
 	return config.streamPreviews !== false;
+}
+
+export function isTelegramRichTextEnabled(config: TelegramConfig): boolean {
+	return config.richText !== false;
 }
 
 export function createTelegramPreviewState(
@@ -885,13 +890,41 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function sendTextReply(chatId: number, _replyToMessageId: number, text: string, parseMode?: "HTML"): Promise<number | undefined> {
-		const chunks = chunkParagraphs(text);
+		// Use richText formatting if enabled and parseMode not explicitly set
+		const useRichText = !parseMode && isTelegramRichTextEnabled(config);
+		
+		let chunks: string[];
+		let effectiveParseMode: "HTML" | undefined;
+		
+		if (useRichText) {
+			// Convert markdown to Telegram HTML and chunk with tag balancing
+			const html = markdownToTelegramHtml(text);
+			chunks = chunkTelegramHtml(html);
+			effectiveParseMode = "HTML";
+		} else {
+			// Use plain text chunking
+			chunks = chunkParagraphs(text);
+			effectiveParseMode = parseMode;
+		}
+		
 		let lastMessageId: number | undefined;
 		for (const chunk of chunks) {
 			const body: Record<string, unknown> = { chat_id: chatId, text: chunk };
-			if (parseMode) body.parse_mode = parseMode;
-			const sent = await callTelegram<TelegramSentMessage>("sendMessage", body);
-			lastMessageId = sent.message_id;
+			if (effectiveParseMode) body.parse_mode = effectiveParseMode;
+			
+			try {
+				const sent = await callTelegram<TelegramSentMessage>("sendMessage", body);
+				lastMessageId = sent.message_id;
+			} catch (error) {
+				// If HTML parse error, fall back to plain text for this chunk
+				if (useRichText && error instanceof Error && error.message.toLowerCase().includes("parse")) {
+					const plainBody: Record<string, unknown> = { chat_id: chatId, text: chunk };
+					const sent = await callTelegram<TelegramSentMessage>("sendMessage", plainBody);
+					lastMessageId = sent.message_id;
+				} else {
+					throw error;
+				}
+			}
 		}
 		return lastMessageId;
 	}

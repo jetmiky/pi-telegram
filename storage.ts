@@ -9,6 +9,7 @@ export interface TelegramConfig {
 	allowedUserId?: number;
 	lastUpdateId?: number;
 	streamPreviews?: boolean;
+	richText?: boolean;
 }
 
 export type TelegramStorageScope = "project" | "global";
