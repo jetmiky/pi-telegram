@@ -1,5 +1,22 @@
 # pi-telegram
 
+> [!IMPORTANT]
+> ## 📦 This project has moved
+>
+> **`pi-telegram` is archived and no longer maintained.** Development has moved to **Pigram**, a clean-architecture rewrite published on npm:
+>
+> ### 👉 [github.com/jetmiky/pigram](https://github.com/jetmiky/pigram)
+>
+> ```bash
+> npm install @jetmiky/pigram
+> ```
+>
+> Pigram carries this project's ideas forward — session-local bridge, rich-text Telegram output, one-step setup — with a reliable `/new`, live streaming previews, file attachments, and a published, versioned npm package. It reads your existing `telegram.json` and migrates it automatically.
+>
+> This repository remains available for reference only. Please file issues and use the new project at the link above.
+
+---
+
 ![pi-telegram screenshot](screenshot.png)
 
 > Full pi build session: [View the session transcript](https://pi.dev/session/#14acfe07b7844c8abec55ed9fbddc17f), which captures the full pi session in which `pi-telegram` was built.
