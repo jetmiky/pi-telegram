@@ -8,7 +8,7 @@
 > ### 👉 [github.com/jetmiky/pigram](https://github.com/jetmiky/pigram)
 >
 > ```bash
-> npm install @jetmiky/pigram
+> pi install npm:@jetmiky/pigram
 > ```
 >
 > Pigram carries this project's ideas forward — session-local bridge, rich-text Telegram output, one-step setup — with a reliable `/new`, live streaming previews, file attachments, and a published, versioned npm package. It reads your existing `telegram.json` and migrates it automatically.
